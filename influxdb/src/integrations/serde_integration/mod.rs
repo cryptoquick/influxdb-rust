@@ -28,7 +28,7 @@
 //! let query = Query::raw_read_query(
 //!     "SELECT temperature FROM /weather_[a-z]*$/ WHERE time > now() - 1m ORDER BY DESC",
 //! );
-//! let mut db_result = client.json_query(query).await?;
+//! let db_result = client.json_query(query).await?;
 //! let _result = db_result
 //!     .deserialize_next::<WeatherWithoutCityName>()?
 //!     .series
@@ -45,6 +45,7 @@
 //! # Ok(())
 //! # }
 //! ```
+// TODO: add docs for deserialize_next_borrowed
 
 mod de;
 
@@ -53,6 +54,8 @@ use reqwest::{Client as ReqwestClient, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize};
 
 use crate::{Client, Error, Query, ReadQuery};
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Deserialize)]
 #[doc(hidden)]
@@ -63,15 +66,28 @@ struct _DatabaseError {
 #[derive(Deserialize, Debug)]
 #[doc(hidden)]
 pub struct DatabaseQueryResult {
-    pub results: Vec<serde_json::Value>,
+    pub results: Vec<Box<serde_json::value::RawValue>>,
+    #[serde(skip)]
+    counter: AtomicUsize,
 }
 
 impl DatabaseQueryResult {
-    pub fn deserialize_next<T: 'static>(&mut self) -> Result<Return<T>, Error>
+    pub fn deserialize_next<T: 'static>(&self) -> Result<Return<T>, Error>
     where
         T: DeserializeOwned + Send,
     {
-        serde_json::from_value::<Return<T>>(self.results.remove(0)).map_err(|err| {
+        serde_json::from_str::<Return<T>>(self.results[self.counter.fetch_add(1, Ordering::Relaxed)].get()).map_err(|err| {
+            Error::DeserializationError {
+                error: format!("could not deserialize: {}", err),
+            }
+        })
+    }
+
+    pub fn deserialize_next_borrowed<'de, T>(&'de self) -> Result<Return<T>, Error>
+    where
+        T: Deserialize<'de> + Send,
+    {
+        serde_json::from_str::<Return<T>>(self.results[self.counter.fetch_add(1, Ordering::Relaxed)].get()).map_err(|err| {
             Error::DeserializationError {
                 error: format!("could not deserialize: {}", err),
             }

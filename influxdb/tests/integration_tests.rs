@@ -285,7 +285,7 @@ async fn test_write_and_read_option() {
                 let result = client
                     .json_query(query)
                     .await
-                    .and_then(|mut db_result| db_result.deserialize_next::<Weather>());
+                    .and_then(|db_result| db_result.deserialize_next::<Weather>());
                 assert_result_ok(&result);
 
                 assert_eq!(
@@ -340,7 +340,7 @@ async fn test_json_query() {
             let result = client
                 .json_query(query)
                 .await
-                .and_then(|mut db_result| db_result.deserialize_next::<Weather>());
+                .and_then(|db_result| db_result.deserialize_next::<Weather>());
             assert_result_ok(&result);
 
             assert_eq!(
@@ -350,6 +350,78 @@ async fn test_json_query() {
                     temperature: 82
                 }
             );
+        },
+        || async move {
+            delete_db(TEST_NAME).await.expect("could not clean up db");
+        },
+    )
+    .await;
+}
+
+/// INTEGRATION TEST
+///
+/// This test case tests whether JSON can be decoded from a InfluxDB response 
+/// in a way that references the response data.
+#[tokio::test]
+#[cfg(feature = "use-serde")]
+async fn test_json_query_borrowed() {
+    use serde::Deserialize;
+    use std::borrow::Cow;
+
+    const TEST_NAME: &str = "test_json_query_borrowed";
+
+    run_test(
+        || async move {
+            create_db(TEST_NAME).await.expect("could not setup db");
+
+            let client = create_client(TEST_NAME);
+
+            let write_query = Timestamp::Hours(11)
+                .into_query("weather_reports")
+                .add_field("title", "Blowy") // could need escaping but doesn't
+                .add_field("summary", "\"It's blowy\", they said.") //needs unescaping
+                .add_field("wind_speed", 160);
+                let write_result = client.query(&write_query).await;
+            assert_result_ok(&write_result);
+
+            #[derive(Deserialize, Debug, PartialEq)]
+            struct WeatherReport <'a> {
+                time: &'a str, // should never need escaping
+                #[serde(borrow)]
+                title: Cow<'a, str>,
+                #[serde(borrow)]
+                summary: Cow<'a, str>,
+                wind_speed: i32,
+            }
+
+            let query = Query::raw_read_query("SELECT * FROM weather_reports");
+            let db_result = client
+                .json_query(query)
+                .await;
+            assert_result_ok(&db_result);
+            let db_result = db_result.unwrap();
+            let result = db_result.deserialize_next_borrowed::<WeatherReport>();
+            assert_result_ok(&result);
+
+            let data = result.unwrap();
+
+            assert_eq!(
+                data.series[0].values[0],
+                WeatherReport {
+                    time: "1970-01-01T11:00:00Z",
+                    wind_speed: 160,
+                    title: "Blowy".into(),
+                    summary: "\"It\'s\\ blowy\"\\,\\ they\\ said.".into(),
+                }
+            );
+            assert!(matches!(
+                data.series[0].values[0].title,
+                Cow::Borrowed(_)
+            ));
+            assert!(matches!(
+                data.series[0].values[0].title,
+                Cow::Borrowed(_)
+            ));
         },
         || async move {
             delete_db(TEST_NAME).await.expect("could not clean up db");
@@ -398,7 +470,7 @@ async fn test_json_query_vec() {
             let result = client
                 .json_query(query)
                 .await
-                .and_then(|mut db_result| db_result.deserialize_next::<Weather>());
+                .and_then(|db_result| db_result.deserialize_next::<Weather>());
             assert_result_ok(&result);
             assert_eq!(result.unwrap().series[0].values.len(), 3);
         },
@@ -454,7 +526,7 @@ async fn test_serde_multi_query() {
                         .add_query("SELECT * FROM humidity"),
                 )
                 .await
-                .and_then(|mut db_result| {
+                .and_then(|db_result| {
                     let temp = db_result.deserialize_next::<Temperature>()?;
                     let humidity = db_result.deserialize_next::<Humidity>()?;
 
